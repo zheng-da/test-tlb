@@ -67,9 +67,15 @@ static unsigned long warmup(void *map)
 	return usec_diff(&start, &end);
 }
 
-static double do_test(void *map)
+static double do_test(void *map, size_t size, size_t stride)
 {
-	unsigned long count = 0, offset = 0, usec;
+#define NUM_THREADS 18
+#define PADDING 8
+	int i;
+	unsigned long counts[NUM_THREADS * PADDING];
+	unsigned long offsets[NUM_THREADS * PADDING];
+	unsigned long tot_counts = 0;
+	unsigned long usec;
 	struct timeval start, end;
 	struct itimerval itval =  {
 		.it_interval = { 0, 0 },
@@ -93,18 +99,29 @@ static double do_test(void *map)
 	setitimer(ITIMER_REAL, &itval, NULL);
 
 	gettimeofday(&start, NULL);
+	for (i = 0; i < NUM_THREADS; i++)
+		offsets[i * PADDING] = ((unsigned long)random() % (size / stride)) * stride;
+#pragma omp parallel for num_threads(NUM_THREADS)
+	for (i = 0; i < NUM_THREADS; i++)
+	{
+		counts[i * PADDING] = 0;
 	do {
-		count++;
-		offset = *(unsigned int *)(map + offset);
+		counts[i * PADDING]++;
+		offsets[i * PADDING] = *(unsigned int *)(map + offsets[i * PADDING]);
 	} while (!stop);
+
+	// Make sure the compiler doesn't compile away offset
+	*(volatile unsigned int *)(map + offsets[i * PADDING]);
+	}
 	gettimeofday(&end, NULL);
 	usec = usec_diff(&start, &end);
 
-	// Make sure the compiler doesn't compile away offset
-	*(volatile unsigned int *)(map + offset);
-
+	for (i = 0; i < NUM_THREADS; i++) {
+		tot_counts += counts[i * PADDING];
+		printf("part %d: %ld\n", i, counts[i * PADDING]);
+	}
 	// return cycle time in ns
-	return 1000 * (double) usec / count;
+	return 1000 * (double) usec / tot_counts;
 }
 
 static unsigned long get_num(const char *str)
@@ -275,7 +292,7 @@ int main(int argc, char **argv)
 		if (random_list)
 			randomize_map(map, size, stride);
 
-		d = do_test(map);
+		d = do_test(map, size, stride);
 		if (d < cycles)
 			cycles = d;
 	}
